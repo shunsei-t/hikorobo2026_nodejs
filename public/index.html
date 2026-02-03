@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ESP32 Telemetry</title>
+  <style>
+    body { display: flex; gap: 10px; font-family: Arial, sans-serif; }
+    #telemetry-wrapper { order: 3; display: flex; flex-direction: column; gap: 20px; width: 440px; }
+    canvas { max-width: 440px; }
+    #attitudeChart, #sbusChart, #servoChart { height: 240px; }
+    #controlPanel { order: 2;  min-width: 220px; max-height: 500px; padding: 12px; border: 1px solid #ccc; }
+    #controlPanel h2 { margin-top: 0; font-size: 18px; }
+    #controlPanel form { display: flex; flex-direction: column; gap: 8px; }
+    #controlPanel label { display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+    #controlPanel input[type="number"] { width: 120px; }
+    #controlPanel input[type="text"] { width: 120px; }
+    #controlStatus { min-height: 1.5em; font-size: 14px; }
+    #flightStatePanel { order: 1;  min-width: 220px; max-height: 500px; border: 1px solid #ccc; padding: 12px; background: #fafafa; }
+    #flightStatePanel h2 { margin: 0 0 8px; font-size: 18px; }
+    .flight-state-current { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+    #flightStateValue {
+      font-size: 20px;
+      font-weight: bold;
+      padding: 6px 12px;
+      border-radius: 6px;
+      display: inline-block;
+      min-width: 160px;
+      text-align: center;
+      color: #fff;
+      background: #6c757d;
+      transition: background 120ms ease;
+    }
+    #flightStateTimestamp { font-size: 12px; color: #555; }
+    #flightStateHistory { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 140px; overflow-y: auto; }
+    .flight-log-entry { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+    .flight-log-entry span { white-space: nowrap; }
+  </style>
+</head>
+<body>
+
+<div id="telemetry-wrapper">
+  <canvas id="attitudeChart"></canvas>
+  <canvas id="sbusChart"></canvas>
+  <canvas id="servoChart"></canvas>
+</div>
+
+<section id="flightStatePanel">
+  <h2>Flight State</h2>
+  <div class="flight-state-current">
+    <div id="flightStateValue">--</div>
+    <div id="flightStateTimestamp">Awaiting telemetry...</div>
+  </div>
+  <ul id="flightStateHistory"></ul>
+</section>
+
+<section id="controlPanel">
+  <h2>Send UDP Control</h2>
+  <form id="controlForm" onkeydown="if(event.key === 'Enter') event.preventDefault();">
+    <label>target_ip <input type="text" name="target_ip" value="192.168.10.15"></label>
+    <label>target_port <input type="number" name="target_port" min="1" max="65535" value="1234"></label>
+    <label>enable_stream <input type="checkbox" name="enable_stream" value="1" onclick="this.checked ? this.value = 1 : this.value = 0;"></label>
+    <label>roll_kp <input type="number" name="roll_kp" step="any" value="0"></label>
+    <label>roll_ki <input type="number" name="roll_ki" step="any" value="0"></label>
+    <label>roll_kd <input type="number" name="roll_kd" step="any" value="0"></label>
+    <label>pitch_kp <input type="number" name="pitch_kp" step="any" value="0"></label>
+    <label>pitch_ki <input type="number" name="pitch_ki" step="any" value="0"></label>
+    <label>pitch_kd <input type="number" name="pitch_kd" step="any" value="0"></label>
+    <button type="submit">Send</button>
+  </form>
+  <p id="controlStatus"></p>
+</section>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+/* ===== WebSocket ===== */
+const ws = new WebSocket(`ws://${location.host}`);
+
+ws.onmessage = (e) => handleTelemetry(JSON.parse(e.data));
+
+const FLIGHT_STATE_LABELS = [
+  "STATE_INIT",
+  "STATE_ERROR",
+  "STATE_AUTO",
+  "STATE_SEMIAUTO",
+  "STATE_MANUAL",
+  "STATE_SBUS_LOST"
+];
+
+const FLIGHT_STATE_COLORS = {
+  0: "#6c757d",
+  1: "#c0392b",
+  2: "#1e88e5",
+  3: "#2e7d32",
+  4: "#f39c12",
+  5: "#8e24aa"
+};
+
+const flightStateValue = document.getElementById("flightStateValue");
+const flightStateTimestamp = document.getElementById("flightStateTimestamp");
+const flightStateHistory = document.getElementById("flightStateHistory");
+let lastFlightState = null;
+
+/* ===== Chart.js Roll/Pitch/Yaw ===== */
+const MAX_ATTITUDE_SAMPLES = 120;
+const CHART_WIDTH = 440;
+const CHART_HEIGHT = 240;
+const attitudeCtx = document.getElementById("attitudeChart");
+attitudeCtx.width = CHART_WIDTH;
+attitudeCtx.height = CHART_HEIGHT;
+const RPY_CONFIG = [
+  { key: "roll", label: "Roll", color: "#f94144" },
+  { key: "pitch", label: "Pitch", color: "#43aa8b" },
+  { key: "yaw", label: "Yaw", color: "#577590" }
+];
+
+const attitudeChart = new Chart(attitudeCtx, {
+  type: "line",
+  data: {
+    labels: Array(MAX_ATTITUDE_SAMPLES).fill(""),
+    datasets: RPY_CONFIG.map(cfg => ({
+      label: cfg.label,
+      data: Array(MAX_ATTITUDE_SAMPLES).fill(0),
+      borderColor: cfg.color,
+      backgroundColor: cfg.color,
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: false,
+      tension: 0.25,
+      telemetryKey: cfg.key
+    }))
+  },
+  options: {
+    animation: false,
+    responsive: false,
+    scales: {
+      y: {
+        min: -180,
+        max: 180,
+        title: { display: true, text: "Degrees" }
+      },
+      x: { display: false }
+    },
+    plugins: {
+      legend: { position: "top" }
+    }
+  }
+});
+
+/* ===== Chart.js SBUS ===== */
+function createBaselinePlugin(id, value, color = 'rgba(128,128,128,0.9)', width = 2) {
+  return {
+    id,
+    afterDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!scales || !scales.y) return;
+      const yPixel = scales.y.getPixelForValue(value);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.moveTo(chartArea.left, yPixel);
+      ctx.lineTo(chartArea.right, yPixel);
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+}
+
+const sbusCtx = document.getElementById("sbusChart");
+sbusCtx.width = CHART_WIDTH;
+sbusCtx.height = CHART_HEIGHT;
+const sbusBaselinePlugin = createBaselinePlugin('sbusBaseline', 1024);
+const sbusChart = new Chart(sbusCtx, {
+  type: "bar",
+  data: {
+    labels: ["CH1","CH2","CH3","CH4","CH5","CH6","CH7","CH8"],
+    datasets: [{
+      label: "SBUS",
+      data: Array(8).fill(0),
+    }]
+  },
+  options: {
+    animation: false,
+    responsive: false,
+    scales: {
+      y: { min: 0, max: 2000 }
+    }
+  },
+  plugins: [sbusBaselinePlugin]
+});
+
+/* ===== Chart.js Servo ===== */
+const SERVO_KEYS = [
+  { key: "servo_aileron", label: "Aileron" },
+  { key: "servo_elevator", label: "Elevator" },
+  { key: "servo_rudder", label: "Rudder" },
+  { key: "servo_throttle", label: "Throttle" },
+  { key: "servo_gear", label: "Gear" }
+];
+const servoCtx = document.getElementById("servoChart");
+servoCtx.width = CHART_WIDTH;
+servoCtx.height = CHART_HEIGHT;
+const servoBaselinePlugin = createBaselinePlugin('servoBaseline', 1024);
+const servoChart = new Chart(servoCtx, {
+  type: "bar",
+  data: {
+    labels: SERVO_KEYS.map(item => item.label),
+    datasets: [{
+      label: "Servo",
+      data: Array(SERVO_KEYS.length).fill(0),
+      borderColor: "#f3722c",
+    }]
+  },
+  options: {
+    animation: false,
+    responsive: false,
+    scales: {
+      y: { min: 0, max: 180 }
+    }
+  }
+});
+
+function handleTelemetry(data) {
+  updateFlightStatePanel(data);
+  updateAttitudeChart(data);
+  if (Array.isArray(data.sbus_data)) {
+    sbusChart.data.datasets[0].data = data.sbus_data;
+    sbusChart.update("none");
+  }
+  const servoValues = SERVO_KEYS.map(item => (
+    typeof data[item.key] === "number" ? data[item.key] : 0
+  ));
+  if (servoValues.some(v => v !== 0)) {
+    servoChart.data.datasets[0].data = servoValues;
+    servoChart.update("none");
+  }
+}
+
+function flightStateLabel(code) {
+  return FLIGHT_STATE_LABELS[code] || `UNKNOWN (${code})`;
+}
+
+function updateFlightStatePanel(sample) {
+  const code = sample.flight_state;
+  if (typeof code !== "number" || code === lastFlightState) return;
+
+  lastFlightState = code;
+  const label = flightStateLabel(code);
+  const timeString = new Date().toLocaleTimeString(undefined, { hour12: false });
+
+  flightStateValue.textContent = label;
+  flightStateValue.style.backgroundColor = FLIGHT_STATE_COLORS[code] || "#455a64";
+  flightStateTimestamp.textContent = `Updated ${timeString}`;
+
+  const entry = document.createElement("li");
+  entry.className = "flight-log-entry";
+
+  const timeSpan = document.createElement("span");
+  timeSpan.textContent = timeString;
+
+  const labelSpan = document.createElement("span");
+  labelSpan.textContent = label;
+
+  entry.appendChild(timeSpan);
+  entry.appendChild(labelSpan);
+  flightStateHistory.prepend(entry);
+
+  while (flightStateHistory.children.length > 8) {
+    flightStateHistory.removeChild(flightStateHistory.lastChild);
+  }
+}
+
+function updateAttitudeChart(sample) {
+  const labels = attitudeChart.data.labels;
+  labels.push("");
+  if (labels.length > MAX_ATTITUDE_SAMPLES) {
+    labels.shift();
+  }
+
+  attitudeChart.data.datasets.forEach(dataset => {
+    const series = dataset.data;
+    const value = typeof sample[dataset.telemetryKey] === "number" ? sample[dataset.telemetryKey] : 0;
+    series.push(value);
+    if (series.length > MAX_ATTITUDE_SAMPLES) {
+      series.shift();
+    }
+  });
+
+  attitudeChart.update("none");
+}
+
+/* ===== UDP Control Form ===== */
+const controlFields = [
+  "enable_stream",
+  "roll_kp",
+  "roll_ki",
+  "roll_kd",
+  "pitch_kp",
+  "pitch_ki",
+  "pitch_kd"
+];
+const controlForm = document.getElementById("controlForm");
+const controlStatus = document.getElementById("controlStatus");
+
+controlForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const payload = {};
+  for (const field of controlFields) {
+    payload[field] = Number(controlForm.elements[field].value);
+  }
+
+  const targetIp = controlForm.elements["target_ip"].value.trim();
+  const targetPortRaw = controlForm.elements["target_port"].value;
+  if (targetIp) payload.target_ip = targetIp;
+  if (targetPortRaw !== "") {
+    payload.target_port = Number(targetPortRaw);
+  }
+
+  controlStatus.textContent = "Sending...";
+
+  try {
+    const response = await fetch("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${response.status}`);
+    }
+
+    controlStatus.textContent = "Sent over UDP.";
+  } catch (error) {
+    controlStatus.textContent = error.message;
+  }
+});
+</script>
+</body>
+</html>
