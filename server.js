@@ -1,5 +1,6 @@
 const dgram = require("dgram");
 const express = require("express");
+const fs = require("fs");
 const WebSocket = require("ws");
 const path = require("path");
 
@@ -13,13 +14,25 @@ const CONTROL_FIELDS = [
   { name: "roll_kd", type: "f32" },
   { name: "pitch_kp", type: "f32" },
   { name: "pitch_ki", type: "f32" },
-  { name: "pitch_kd", type: "f32" }
+  { name: "pitch_kd", type: "f32" },
+  { name: "target_roll", type: "f32" },
+  { name: "target_pitch", type: "f32" }
 ];
-// 2 bytes (u16) + 6 * 4 bytes (float)
-const CONTROL_PACKET_SIZE = 2 + 6 * 4;
+// 2 bytes (u16) + 8 * 4 bytes (float)
+const CONTROL_PACKET_SIZE = 2 + 8 * 4;
 
 const udp = dgram.createSocket("udp4");
 let lastTelemetrySender = null;
+/** 最後にブロードキャストしたテレメトリJSON（新規WS接続時に送る） */
+let lastTelemetryJson = null;
+
+// ===== CSV Logging =====
+const DEFAULT_CSV_DIR = "logs";
+const CSV_HEADER =
+  "timestamp_iso,stamp_ms,sbus_1,sbus_2,sbus_3,sbus_4,sbus_5,sbus_6,sbus_7,sbus_8," +
+  "flight_state,roll,pitch,yaw,ax,ay,az," +
+  "servo_aileron,servo_elevator,servo_rudder,servo_throttle,servo_gear";
+let csvLoggingPath = null;
 
 // ===== Web =====
 const app = express();
@@ -31,6 +44,36 @@ app.use(express.json());
 app.use(express.static("public"));
 
 const wss = new WebSocket.Server({ server });
+
+wss.on("connection", (ws) => {
+  if (lastTelemetryJson && ws.readyState === WebSocket.OPEN) {
+    ws.send(lastTelemetryJson);
+  }
+});
+
+function dataToCsvRow(data) {
+  const ts = new Date().toISOString();
+  const sbus = Array.isArray(data.sbus_data) ? data.sbus_data : [];
+  const sbusCols = Array.from({ length: 8 }, (_, i) => sbus[i] ?? "");
+  const nums = [
+    data.stamp_ms,
+    ...sbusCols,
+    data.flight_state,
+    data.roll, data.pitch, data.yaw,
+    data.ax, data.ay, data.az,
+    data.servo_aileron, data.servo_elevator, data.servo_rudder,
+    data.servo_throttle, data.servo_gear
+  ];
+  return ts + "," + nums.map(v => v === null || v === undefined ? "" : String(v)).join(",") + "\n";
+}
+
+function appendCsvRow(data) {
+  if (!csvLoggingPath) return;
+  const row = dataToCsvRow(data);
+  fs.appendFile(csvLoggingPath, row, (err) => {
+    if (err) console.error("CSV append failed:", err);
+  });
+}
 
 function parseUDPSendData(buf) {
   let o = 0;
@@ -58,16 +101,17 @@ function parseUDPSendData(buf) {
   const servo_throttle = buf.readInt16LE(o); o += 2;
   const servo_gear     = buf.readInt16LE(o); o += 2;
 
+  const sanitize = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
   return {
     stamp_ms,
     sbus_data,
     flight_state,
-    roll,
-    pitch,
-    yaw,
-    ax,
-    ay,
-    az,
+    roll: sanitize(roll),
+    pitch: sanitize(pitch),
+    yaw: sanitize(yaw),
+    ax: sanitize(ax),
+    ay: sanitize(ay),
+    az: sanitize(az),
     servo_aileron,
     servo_elevator,
     servo_rudder,
@@ -83,6 +127,9 @@ udp.on("message", (msg, rinfo) => {
 
   const data = parseUDPSendData(msg);
   const json = JSON.stringify(data);
+  lastTelemetryJson = json;
+
+  appendCsvRow(data);
 
   wss.clients.forEach(ws => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -133,6 +180,47 @@ function isValidIPv4(address) {
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
+
+// ===== CSV Logging API =====
+app.get("/api/csv/status", (req, res) => {
+  res.json({
+    logging: !!csvLoggingPath,
+    path: csvLoggingPath
+  });
+});
+
+app.post("/api/csv/start", (req, res) => {
+  if (csvLoggingPath) {
+    return res.status(400).json({ error: "CSV logging already started.", path: csvLoggingPath });
+  }
+  const dir = typeof req.body?.dir === "string" && req.body.dir.trim() !== ""
+    ? req.body.dir.trim()
+    : DEFAULT_CSV_DIR;
+  const base = path.resolve(process.cwd(), dir);
+  try {
+    if (!fs.existsSync(base)) {
+      fs.mkdirSync(base, { recursive: true });
+    }
+    const name = `telemetry_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.csv`;
+    csvLoggingPath = path.join(base, name);
+    fs.writeFileSync(csvLoggingPath, CSV_HEADER + "\n", "utf8");
+    console.log("CSV logging started:", csvLoggingPath);
+    res.json({ ok: true, path: csvLoggingPath });
+  } catch (err) {
+    console.error("CSV start failed:", err);
+    res.status(500).json({ error: "Failed to start CSV logging.", message: err.message });
+  }
+});
+
+app.post("/api/csv/stop", (req, res) => {
+  if (!csvLoggingPath) {
+    return res.status(400).json({ error: "CSV logging is not started." });
+  }
+  const stopped = csvLoggingPath;
+  csvLoggingPath = null;
+  console.log("CSV logging stopped:", stopped);
+  res.json({ ok: true, path: stopped });
+});
 
 app.post("/api/control", (req, res) => {
   const payload = {};

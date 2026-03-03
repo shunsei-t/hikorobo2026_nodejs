@@ -56,18 +56,29 @@
 <section id="controlPanel">
   <h2>Send UDP Control</h2>
   <form id="controlForm" onkeydown="if(event.key === 'Enter') event.preventDefault();">
-    <label>target_ip <input type="text" name="target_ip" value="192.168.10.15"></label>
+    <label>target_ip <input type="text" name="target_ip" value="192.168.0.15"></label>
     <label>target_port <input type="number" name="target_port" min="1" max="65535" value="1234"></label>
-    <label>enable_stream <input type="checkbox" name="enable_stream" value="1" onclick="this.checked ? this.value = 1 : this.value = 0;"></label>
+    <label>enable_stream <input type="checkbox" name="enable_stream" value="0" onclick="this.checked ? this.value = 1 : this.value = 0;"></label>
     <label>roll_kp <input type="number" name="roll_kp" step="any" value="0"></label>
     <label>roll_ki <input type="number" name="roll_ki" step="any" value="0"></label>
     <label>roll_kd <input type="number" name="roll_kd" step="any" value="0"></label>
     <label>pitch_kp <input type="number" name="pitch_kp" step="any" value="0"></label>
     <label>pitch_ki <input type="number" name="pitch_ki" step="any" value="0"></label>
     <label>pitch_kd <input type="number" name="pitch_kd" step="any" value="0"></label>
+    <label>target_roll <input type="number" name="target_roll" step="any" value="0"></label>
+    <label>target_pitch <input type="number" name="target_pitch" step="any" value="0"></label>
     <button type="submit">Send</button>
   </form>
   <p id="controlStatus"></p>
+</section>
+
+<section id="csvPanel" style="order: 4; min-width: 220px; padding: 12px; border: 1px solid #ccc;">
+  <h2 style="margin-top: 0; font-size: 18px;">CSV Log</h2>
+  <p id="csvStatus" style="font-size: 13px; color: #555; min-height: 1.5em;">--</p>
+  <div style="display: flex; gap: 8px;">
+    <button type="button" id="csvStart">Start</button>
+    <button type="button" id="csvStop" disabled>Stop</button>
+  </div>
 </section>
 
 <!-- Chart.js -->
@@ -136,8 +147,8 @@ const attitudeChart = new Chart(attitudeCtx, {
     responsive: false,
     scales: {
       y: {
-        min: -180,
-        max: 180,
+        min: -100,
+        max: 100,
         title: { display: true, text: "Degrees" }
       },
       x: { display: false }
@@ -176,7 +187,7 @@ const sbusBaselinePlugin = createBaselinePlugin('sbusBaseline', 1024);
 const sbusChart = new Chart(sbusCtx, {
   type: "bar",
   data: {
-    labels: ["CH1","CH2","CH3","CH4","CH5","CH6","CH7","CH8"],
+    labels: ["CH1\nAIL1","CH2\nELE","CH3\nTHR","CH4\nRUD","CH5\nGER","CH6\nAIL2","CH7","CH8"],
     datasets: [{
       label: "SBUS",
       data: Array(8).fill(0),
@@ -282,7 +293,8 @@ function updateAttitudeChart(sample) {
 
   attitudeChart.data.datasets.forEach(dataset => {
     const series = dataset.data;
-    const value = typeof sample[dataset.telemetryKey] === "number" ? sample[dataset.telemetryKey] : 0;
+    const raw = sample[dataset.telemetryKey];
+    const value = (typeof raw === "number" && Number.isFinite(raw)) ? raw : 0;
     series.push(value);
     if (series.length > MAX_ATTITUDE_SAMPLES) {
       series.shift();
@@ -300,7 +312,9 @@ const controlFields = [
   "roll_kd",
   "pitch_kp",
   "pitch_ki",
-  "pitch_kd"
+  "pitch_kd",
+  "target_roll",
+  "target_pitch"
 ];
 const controlForm = document.getElementById("controlForm");
 const controlStatus = document.getElementById("controlStatus");
@@ -339,6 +353,57 @@ controlForm.addEventListener("submit", async (event) => {
     controlStatus.textContent = error.message;
   }
 });
+
+/* ===== CSV Log ===== */
+const csvStatus = document.getElementById("csvStatus");
+const csvStart = document.getElementById("csvStart");
+const csvStop = document.getElementById("csvStop");
+
+async function refreshCsvStatus() {
+  try {
+    const r = await fetch("/api/csv/status");
+    const data = await r.json();
+    if (data.logging) {
+      csvStatus.textContent = "Recording: " + (data.path || "").split(/[/\\]/).pop();
+      csvStart.disabled = true;
+      csvStop.disabled = false;
+    } else {
+      csvStatus.textContent = "Stopped.";
+      csvStart.disabled = false;
+      csvStop.disabled = true;
+    }
+  } catch (e) {
+    csvStatus.textContent = "Error: " + e.message;
+  }
+}
+
+csvStart.addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/csv/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir: "logs" })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Start failed");
+    await refreshCsvStatus();
+  } catch (e) {
+    csvStatus.textContent = e.message;
+  }
+});
+
+csvStop.addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/csv/stop", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Stop failed");
+    await refreshCsvStatus();
+  } catch (e) {
+    csvStatus.textContent = e.message;
+  }
+});
+
+refreshCsvStatus();
 </script>
 </body>
 </html>
