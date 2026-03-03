@@ -59,15 +59,18 @@
     <label>target_ip <input type="text" name="target_ip" value="192.168.0.15"></label>
     <label>target_port <input type="number" name="target_port" min="1" max="65535" value="1234"></label>
     <label>enable_stream <input type="checkbox" name="enable_stream" value="0" onclick="this.checked ? this.value = 1 : this.value = 0;"></label>
-    <label>roll_kp <input type="number" name="roll_kp" step="any" value="0"></label>
+    <label>roll_kp <input type="number" name="roll_kp" step="any" value="2.0"></label>
     <label>roll_ki <input type="number" name="roll_ki" step="any" value="0"></label>
-    <label>roll_kd <input type="number" name="roll_kd" step="any" value="0"></label>
-    <label>pitch_kp <input type="number" name="pitch_kp" step="any" value="0"></label>
-    <label>pitch_ki <input type="number" name="pitch_ki" step="any" value="0"></label>
+    <label>roll_kd <input type="number" name="roll_kd" step="any" value="-0.1"></label>
+    <label>pitch_kp <input type="number" name="pitch_kp" step="any" value="2.0"></label>
+    <label>pitch_ki <input type="number" name="pitch_ki" step="any" value="1.0"></label>
     <label>pitch_kd <input type="number" name="pitch_kd" step="any" value="0"></label>
     <label>target_roll <input type="number" name="target_roll" step="any" value="0"></label>
     <label>target_pitch <input type="number" name="target_pitch" step="any" value="0"></label>
-    <button type="submit">Send</button>
+    <div style="display: flex; gap: 8px; margin-top: 8px;">
+      <button type="submit">Send</button>
+      <button type="button" id="exportControlTxt">Download txt</button>
+    </div>
   </form>
   <p id="controlStatus"></p>
 </section>
@@ -318,6 +321,7 @@ const controlFields = [
 ];
 const controlForm = document.getElementById("controlForm");
 const controlStatus = document.getElementById("controlStatus");
+const exportControlBtn = document.getElementById("exportControlTxt");
 
 controlForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -353,6 +357,49 @@ controlForm.addEventListener("submit", async (event) => {
     controlStatus.textContent = error.message;
   }
 });
+
+function buildControlParamText() {
+  const lines = [];
+  lines.push("# UDP control parameters");
+  lines.push("# generated at " + new Date().toISOString());
+  lines.push("");
+
+  const targetIp = controlForm.elements["target_ip"].value.trim();
+  const targetPortRaw = controlForm.elements["target_port"].value;
+  if (targetIp) lines.push("target_ip=" + targetIp);
+  if (targetPortRaw !== "") lines.push("target_port=" + targetPortRaw);
+
+  for (const field of controlFields) {
+    const el = controlForm.elements[field];
+    if (!el) continue;
+    const value = el.value;
+    lines.push(field + "=" + value);
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+if (exportControlBtn) {
+  exportControlBtn.addEventListener("click", () => {
+    const txt = buildControlParamText();
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const filename = "udp_control_" + ts + ".txt";
+    downloadText(filename, txt);
+    controlStatus.textContent = "Saved parameters to " + filename;
+  });
+}
 
 /* ===== CSV Log ===== */
 const csvStatus = document.getElementById("csvStatus");
